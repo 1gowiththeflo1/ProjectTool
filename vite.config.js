@@ -1,15 +1,12 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-server: {
-  allowedHosts: ['devserver-main--porjectcalc.netlify.app'],
-}
-server: {
-  allowedHosts: true
-}
-
 export default defineConfig({
   plugins: [react()],
+  server: {
+    // erlaubte Hosts für Entwicklung (falls benötigt)
+    allowedHosts: ['devserver-main--porjectcalc.netlify.app'],
+  },
   build: {
     outDir: "dist",
   },

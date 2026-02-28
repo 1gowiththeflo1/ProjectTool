@@ -1,10 +1,22 @@
 import { useState, useMemo, useRef, useCallback } from "react";
 
-const generateId = () => Math.random().toString(36).substr(2, 9);
-const formatCurrency = (val) =>
-  new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" }).format(val || 0);
+// --- Verbesserte Hilfsfunktionen ---
+const generateId = () => {
+  // Nutze crypto.randomUUID wenn verfügbar, Fallback zu Math.random
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) {
+      return crypto.randomUUID().replace(/-/g, "");
+    }
+  } catch {}
+  return Math.random().toString(36).substr(2, 9);
+};
 
-// ─── Two-level category structure ────────────────────────────────────────────
+const formatCurrency = (val) => {
+  const num = Number(val);
+  const amount = Number.isFinite(num) ? num : 0;
+  return new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" }).format(amount);
+};
+// --- Ende Verbesserte Hilfsfunktionen ---
 
 const DEFAULT_CATEGORIES = {
   "Licht": ["Hardware", "Kabel & Stecker", "Steuerung", "Montage", "Sonstiges"],
@@ -1377,15 +1389,6 @@ function DashboardTab({ project, onNavigateReceipt }) {
 
 // ─── PROJECT SAVE / LOAD / EXPORT ────────────────────────────────────────────
 
-function fileToBase64(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result.split(",")[1]);
-    r.onerror = () => rej(new Error("Datei konnte nicht gelesen werden"));
-    r.readAsDataURL(file);
-  });
-}
-
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -1509,6 +1512,46 @@ function ProjectToolbar({ project, setProject }) {
   );
 }
 
+// <-- NEU: Lokales Login-Modal (blockierend, Default admin / !Lob12preis!) -->
+const DEFAULT_USER = { username: "admin", password: "!Lob12preis!" };
+
+function LoginModal({ onLogin }) {
+  const [username, setUsername] = useState(DEFAULT_USER.username);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  const submit = () => {
+    setError("");
+    if (!username.trim()) return setError("Benutzername erforderlich");
+    if (!password) return setError("Passwort erforderlich");
+    if (username === DEFAULT_USER.username && password === DEFAULT_USER.password) {
+      onLogin({ username });
+    } else {
+      setError("Ungültige Anmeldedaten");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-sm p-6">
+        <h2 className="text-lg font-semibold text-zinc-100 mb-3">Anmelden</h2>
+        <p className="text-xs text-zinc-500 mb-4">Bitte mit Benutzername und Passwort anmelden.</p>
+        <div className="space-y-3">
+          <Input label="Benutzername" value={username} onChange={e => setUsername(e.target.value)} />
+          <Input label="Passwort" type="password" value={password} onChange={e => setPassword(e.target.value)} />
+          {error && <div className="text-xs text-red-400">{error}</div>}
+          <div className="flex items-center gap-2 mt-2">
+            <Button onClick={submit}>Anmelden</Button>
+            <Button variant="ghost" onClick={() => { setPassword(""); setError(""); }}>Zurücksetzen</Button>
+          </div>
+          <div className="text-xs text-zinc-500 mt-2">Standard: <span className="font-medium">admin</span> / <span className="font-medium">!Lob12preis!</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+// <-- Ende NEU -->
+
 // ─── DEMO DATA ───────────────────────────────────────────────────────────────
 
 const DEMO_PROJECT = {
@@ -1558,6 +1601,26 @@ export default function CostTracker() {
     setActiveTab("receipts");
   }, []);
 
+  // <-- NEU: Auth state & handlers -->
+  const [user, setUser] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("av_user") || "null");
+    } catch {
+      return null;
+    }
+  });
+
+  const handleLogin = (u) => {
+    setUser(u);
+    try { localStorage.setItem("av_user", JSON.stringify(u)); } catch {}
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    try { localStorage.removeItem("av_user"); } catch {}
+  };
+  // <-- Ende NEU -->
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100" style={{ fontFamily: "'DM Sans', 'Segoe UI', system-ui, sans-serif" }}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
@@ -1577,6 +1640,13 @@ export default function CostTracker() {
           </div>
           <div className="flex items-center gap-2">
             <ProjectToolbar project={project} setProject={setProject} />
+            {/* NEU: User-Anzeige / Logout */}
+            {user ? (
+              <div className="flex items-center gap-2 ml-2">
+                <span className="text-sm text-zinc-300">👤 {user.username}</span>
+                <Button variant="ghost" size="sm" onClick={handleLogout}>Abmelden</Button>
+              </div>
+            ) : null}
           </div>
         </div>
         <div className="max-w-7xl mx-auto px-4">
@@ -1608,6 +1678,9 @@ export default function CostTracker() {
           AV Kostentracker · {project.receipts.filter(r => r.pdfBase64).length} PDFs angehängt · 💾 Speichern sichert alles inkl. PDFs als .avproj.json
         </p>
       </footer>
+
+      {/* NEU: Login-Overlay, erscheint wenn kein eingeloggter User */}
+      {!user && <LoginModal onLogin={handleLogin} />}
     </div>
   );
 }
