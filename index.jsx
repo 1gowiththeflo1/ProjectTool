@@ -18,6 +18,34 @@ const formatCurrency = (val) => {
 };
 // --- Ende Verbesserte Hilfsfunktionen ---
 
+// --- Robustere Datei-Utility (VOR PdfImportModal) ---
+function fileToBase64(file) {
+  return new Promise((res, rej) => {
+    if (!file) return rej(new Error("Keine Datei ausgewählt"));
+    if (!file.type.includes("pdf") && !file.name.toLowerCase().endsWith(".pdf")) {
+      return rej(new Error("Nur PDF-Dateien sind erlaubt"));
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const result = reader.result;
+        if (!result) throw new Error("FileReader lieferte kein Ergebnis");
+        const base64 = result.includes(",") ? result.split(",")[1] : result;
+        if (!base64) throw new Error("Base64-Konvertierung fehlgeschlagen");
+        res(base64);
+      } catch (err) {
+        rej(err);
+      }
+    };
+    reader.onerror = () => {
+      const err = reader.error || new Error("Datei konnte nicht gelesen werden");
+      rej(err);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+// --- Ende Utility ---
+
 const DEFAULT_CATEGORIES = {
   "Licht": ["Hardware", "Kabel & Stecker", "Steuerung", "Montage", "Sonstiges"],
   "Audio": ["Lautsprecher", "Verstärker", "Mischpult", "DSP/Controller", "Mikrofone", "Kabel & Stecker", "Montage", "Sonstiges"],
@@ -128,32 +156,52 @@ function ConfirmDelete({ message, onConfirm, onCancel }) {
 // ─── PDF INVOICE IMPORT MODULE ───────────────────────────────────────────────
 
 async function extractTextFromPDF(file) {
-  const pdfjsLib = await loadPdfJs();
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  let fullText = "";
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const pageText = content.items.map(item => item.str).join(" ");
-    fullText += pageText + "\n\n";
+  try {
+    const pdfjsLib = await loadPdfJs();
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const pageText = content.items.map(item => item.str).join(" ");
+      fullText += pageText + "\n\n";
+    }
+    return fullText;
+  } catch (err) {
+    console.error("PDF-Extraktionsfehler:", err);
+    throw new Error(`PDF konnte nicht gelesen werden: ${err.message}`);
   }
-  return fullText;
 }
 
 let _pdfjsLoaded = null;
 function loadPdfJs() {
   if (_pdfjsLoaded) return _pdfjsLoaded;
   _pdfjsLoaded = new Promise((resolve, reject) => {
-    if (window.pdfjsLib) { resolve(window.pdfjsLib); return; }
-    const script = document.createElement("script");
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
-    script.onload = () => {
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    if (window.pdfjsLib) {
+      console.log("PDF.js bereits geladen");
       resolve(window.pdfjsLib);
+      return;
+    }
+    console.log("Lade PDF.js...");
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.269/pdf.min.js";
+    script.onerror = () => {
+      _pdfjsLoaded = null;
+      reject(new Error("PDF.js-Skript konnte nicht geladen werden"));
     };
-    script.onerror = () => reject(new Error("PDF.js konnte nicht geladen werden"));
+    script.onload = () => {
+      try {
+        if (!window.pdfjsLib) throw new Error("window.pdfjsLib nicht verfügbar");
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+          "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.269/pdf.worker.min.js";
+        console.log("PDF.js erfolgreich geladen");
+        resolve(window.pdfjsLib);
+      } catch (err) {
+        _pdfjsLoaded = null;
+        reject(err);
+      }
+    };
     document.head.appendChild(script);
   });
   return _pdfjsLoaded;
@@ -196,7 +244,13 @@ Wenn du etwas nicht erkennen kannst, verwende sinnvolle Standardwerte (qty: 1, u
     }),
   });
 
+  if (!response.ok) {
+    throw new Error(`API-Fehler: ${response.status} ${response.statusText}`);
+  }
+
   const data = await response.json();
+  if (data.error) throw new Error(`API-Fehler: ${data.error.message}`);
+
   const text = data.content
     .map(item => (item.type === "text" ? item.text : ""))
     .filter(Boolean)
@@ -218,7 +272,13 @@ function PdfImportModal({ onClose, onImport }) {
   const fileInputRef = useRef(null);
 
   const handleFile = useCallback(async (file) => {
-    if (!file || !file.name.toLowerCase().endsWith(".pdf")) {
+    if (!file) {
+      setError("Keine Datei ausgewählt");
+      setStatus("error");
+      return;
+    }
+
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
       setError("Bitte eine PDF-Datei auswählen.");
       setStatus("error");
       return;
@@ -230,14 +290,11 @@ function PdfImportModal({ onClose, onImport }) {
       setPdfFileName(file.name);
 
       // Read as base64 for storage
-      const base64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result.split(",")[1]);
-        r.onerror = () => rej(new Error("Datei konnte nicht gelesen werden"));
-        r.readAsDataURL(file);
-      });
+      console.log("Konvertiere PDF zu Base64...");
+      const base64 = await fileToBase64(file);
       setPdfBase64(base64);
 
+      console.log("Extrahiere Text aus PDF...");
       const text = await extractTextFromPDF(file);
       setPdfText(text);
 
@@ -248,7 +305,10 @@ function PdfImportModal({ onClose, onImport }) {
       }
 
       setStatus("parsing");
+      console.log("Parse Rechnung mit KI...");
       const result = await parseInvoiceWithAI(text);
+      console.log("KI-Ergebnis:", result);
+
       setParsed(result);
       setEditMeta({
         supplier: result.supplier || "",
@@ -266,7 +326,7 @@ function PdfImportModal({ onClose, onImport }) {
       })));
       setStatus("preview");
     } catch (err) {
-      console.error(err);
+      console.error("Fehler bei PDF-Import:", err);
       setError(`Fehler: ${err.message}`);
       setStatus("error");
     }
@@ -363,8 +423,8 @@ function PdfImportModal({ onClose, onImport }) {
           {/* Upload Area */}
           {(status === "idle" || status === "error") && (
             <div
-              onDrop={handleDrop}
-              onDragOver={handleDragOver}
+              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); const file = e.dataTransfer?.files?.[0]; if (file) handleFile(file); }}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
               onClick={() => fileInputRef.current?.click()}
               className="border-2 border-dashed border-zinc-700 hover:border-amber-500/50 rounded-xl p-12 text-center cursor-pointer transition-colors group"
             >
@@ -378,8 +438,9 @@ function PdfImportModal({ onClose, onImport }) {
 
           {error && (
             <div className="mt-4 bg-red-950/40 border border-red-800/30 rounded-lg px-4 py-3">
-              <p className="text-sm text-red-300">{error}</p>
-              <Button variant="ghost" size="sm" className="mt-2" onClick={() => { setStatus("idle"); setError(""); }}>
+              <p className="text-sm text-red-300 mb-2">{error}</p>
+              <p className="text-xs text-red-300/60 mb-2">💡 Tipp: Stelle sicher, dass die PDF Text enthält (keine gescannte Bilder) und die Claude-API erreichbar ist.</p>
+              <Button variant="ghost" size="sm" onClick={() => { setStatus("idle"); setError(""); }}>
                 Erneut versuchen
               </Button>
             </div>
@@ -503,7 +564,12 @@ function PdfImportModal({ onClose, onImport }) {
               <span className="text-sm text-zinc-400">
                 {editLines.filter(l => l.include).length} Positionen → Belege
               </span>
-              <Button onClick={doImport} disabled={editLines.filter(l => l.include && l.description).length === 0}>
+              <Button onClick={() => {
+                const receipt = { id: generateId(), supplier: editMeta.supplier, date: editMeta.date, number: editMeta.invoiceNumber, totalGross: editMeta.totalGross, notes: "PDF-Import", pdfBase64: pdfBase64 || null, pdfFileName: pdfFileName || null };
+                const lines = editLines.filter(l => l.include && l.description).map(l => ({ id: generateId(), receiptId: receipt.id, description: l.description, qty: l.qty, unitPrice: l.unitPrice, lineTotal: l.lineTotal, itemId: null }));
+                onImport(receipt, lines);
+                onClose();
+              }} disabled={editLines.filter(l => l.include && l.description).length === 0}>
                 ✓ Importieren
               </Button>
             </div>
